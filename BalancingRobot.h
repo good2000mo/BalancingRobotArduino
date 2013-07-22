@@ -3,18 +3,15 @@
 
 #include <stdint.h> // Needed for uint8_t
 
-//#define PROMINI
-
 char stringBuf[30];
 
 bool sendData;
 bool sendPIDValues;
-uint8_t dataCounter;
 
 #define PWM_FREQUENCY 20000 // The motor driver can handle a pwm frequency up to 20kHz
 #define PWMVALUE F_CPU/PWM_FREQUENCY/2 // Frequency is given by F_CPU/(2*N*ICR) - where N is the prescaler, we use no prescaling so frequency is given by F_CPU/(2*ICR) - ICR = F_CPU/PWM_FREQUENCY/2
 
-/* Used for the PS3 Communication and motor functions */
+/* Used for the Communication and motor functions */
 int lastCommand; // This is used set a new targetPosition
 enum Command {
   stop,
@@ -22,7 +19,6 @@ enum Command {
   backward,
   left,
   right,
-  imu,
   joystick,
 };
 
@@ -32,72 +28,55 @@ enum Command {
 #define sbi(sfr, bit) (_SFR_BYTE(sfr) |= _BV(bit))
 
 /* Left motor */
-#ifdef PROMINI
 #define leftPort PORTC
 #define leftPortDirection DDRC
-#define leftA PINC2 // PC2 - pin A2 (2INA on the Pololu motor driver)
-#define leftB PINC3 // PC3 - pin A3 (2INB on the Pololu motor driver)
-#else
-#define leftPort PORTD
-#define leftPortDirection DDRD
-#define leftA PIND0 // PD0 - pin 0 (2INA on the Pololu motor driver)
-#define leftB PIND1 // PD1 - pin 1 (2INB on the Pololu motor driver)
-#endif
+#define leftA PINC0
+#define leftB PINC1
 
 #define leftPwmPortDirection DDRB
-#define leftPWM PINB1 // PB1 - pin 9 (OC1A) - (2PWM on the Pololu motor driver)
+#define leftPWM PINB2
 
 /* Right motor */
 #define rightPort PORTC
 #define rightPortDirection DDRC
 #define rightPwmPortDirection DDRB
 
-#define rightA PINC4 // PC4 - pin A4 (1INA on the Pololu motor driver)
-#define rightB PINC5 // PC5 - pin A5 (1INB on the Pololu motor driver)
-#define rightPWM PINB2 // PB2 - pin 10 (OC1B) - (1PWM on the Pololu motor driver)
-
-/* 
-  Note that the right motor is connected as so to the Pololu motor driver:
-  Black wire - output 1A
-  Red wire - output 1B
-  And the left motor is connected as so to the Pololu motor driver:
-  Red wire - output 2A
-  Black wire - output 2B
-*/  
+#define rightA PINC2
+#define rightB PINC3
+#define rightPWM PINB1
 
 /* Encoders */
-#define leftEncoder1 2 // Yellow wire
-#define leftEncoder2 4 // White wire
-#define rightEncoder1 3 // White wire
-#define rightEncoder2 5 // Yellow wire
+#define leftEncoder1 2
+#define leftEncoder2 4
+#define rightEncoder1 3
+#define rightEncoder2 5
 
 volatile long leftCounter = 0;
 volatile long rightCounter = 0;
 
 /* IMU */
-#define gyroY A0
-#ifdef PROMINI
-#define accY A6
-#define accZ A7
-#else
-#define accY A1
-#define accZ A2
-#endif
+int16_t accX, accY, accZ;
+int16_t gyroX, gyroY, gyroZ;
+//int16_t accY;
+//int16_t accZ;
+//int16_t gyroX;
 
-#define buzzer 6 // Connected to a BC547 transistor - there is a protection diode at the buzzer as well
+uint8_t i2cBuffer[14]; // Buffer for I2C data
 
-// Zero voltage values for the sensors - [0] = gyroY, [1] = accY, [2] = accZ
-double zeroValues[3] = { 0 };
+#define ledPin 13
+
+// Zero voltage values for the sensors - gyroX
+double gyroX_offset = 0;
 
 // Results
-double accYangle;
-double gyroYrate;
+double accAngle;
+double gyroRate;
 double gyroAngle;
 double pitch;
 
 /* PID variables */
 double Kp = 7;
-double Ki = 2;
+double Ki = 0;
 double Kd = 8;
 double targetAngle = 180;
 
@@ -108,8 +87,10 @@ double iTerm; // Store integral term
 unsigned long timer;
 
 #define STD_LOOP_TIME 10000 // Fixed time loop of 10 milliseconds
-unsigned long lastLoopUsefulTime = STD_LOOP_TIME;
 unsigned long loopStartTime;
+
+uint32_t encoderTimer; // Timer used used to determine when to update the encoder values
+uint32_t dataTimer; // This is used so it doesn't send data to often
 
 bool steerForward;
 bool steerBackward;
@@ -132,12 +113,12 @@ long wheelPosition;
 long lastWheelPosition;
 long wheelVelocity;
 long targetPosition;
-int zoneA = 4000;
-int zoneB = 2000;
-double positionScaleA = 250; // One resolution is 464 pulses
-double positionScaleB = 500; 
-double positionScaleC = 1000;
-double velocityScaleMove = 35;
-double velocityScaleStop = 30;
-double velocityScaleTurning = 35;
+int zoneA = 8000;
+int zoneB = 4000;
+double positionScaleA = 500; // One resolution is 464 pulses
+double positionScaleB = 1000; 
+double positionScaleC = 2000;
+double velocityScaleMove = 70;
+double velocityScaleStop = 60;
+double velocityScaleTurning = 70;
 #endif

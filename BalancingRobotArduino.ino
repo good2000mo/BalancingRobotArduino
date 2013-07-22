@@ -1,24 +1,26 @@
-/*
- * The code is released under the GNU General Public License.
- * Developed by Kristian Lauszus
- * This is the algorithm for my balancing robot/segway.
- * It is controlled by either an Android app or a Processing application via bluetooth.
- * The Android app can be found at the following link: https://github.com/TKJElectronics/BalanduinoAndroidApp
- * The Processing application can be found here: https://github.com/TKJElectronics/BalancingRobotArduino/tree/master/ProcessingApp
- * The SPP Bluetooth Library can be found at the following link: https://github.com/felis/USB_Host_Shield_2.0
- * For details, see http://blog.tkjelectronics.dk/2012/02/the-balancing-robot/
- */
-
 #include "BalancingRobot.h"
-#include <Kalman.h> // Kalman filter library see: http://blog.tkjelectronics.dk/2012/09/a-practical-approach-to-kalman-filter-and-how-to-implement-it/
+
+// Arduino Wire library is required if I2Cdev I2CDEV_ARDUINO_WIRE implementation
+// is used in I2Cdev.h
+#include "Wire.h"
+
+// I2Cdev and MPU6050 must be installed as libraries, or else the .cpp/.h files
+// for both classes must be in the include path of your project
+#include "I2Cdev.h"
+#include "MPU6050.h"
+
+// class default I2C address is 0x68
+// specific I2C addresses may be passed as a parameter here
+// AD0 low = 0x68 (default for InvenSense evaluation board)
+// AD0 high = 0x69
+MPU6050 accelgyro;
+
+#include "Kalman.h" // Kalman filter library see: http://blog.tkjelectronics.dk/2012/09/a-practical-approach-to-kalman-filter-and-how-to-implement-it/
 Kalman kalman; // See https://github.com/TKJElectronics/KalmanFilter for source code
 
-#include <SPP.h> // SS is rerouted to 8 and INT is rerouted to 7 - see http://www.circuitsathome.com/usb-host-shield-hardware-manual at "5. Interface modifications"
-USB Usb;
-BTD Btd(&Usb); // Uncomment DEBUG in "BTD.cpp" to save space
-SPP SerialBT(&Btd,"BalancingRobot","0000"); // Also uncomment DEBUG in "SPP.cpp"
-
 void setup() {
+  Serial.begin(115200);
+
   /* Setup encoders */
   pinMode(leftEncoder1,INPUT);
   pinMode(leftEncoder2,INPUT);
@@ -37,6 +39,7 @@ void setup() {
 
   /* Set PWM frequency to 20kHz - see the datasheet http://www.atmel.com/Images/doc8025.pdf page 128-135 */
   // Set up PWM, Phase and Frequency Correct on pin 9 (OC1A) & pin 10 (OC1B) with ICR1 as TOP using Timer1
+  TCCR1A = 0;
   TCCR1B = _BV(WGM13) | _BV(CS10); // Set PWM Phase and Frequency Correct with ICR1 as TOP and no prescaling
   ICR1H = (PWMVALUE >> 8); // ICR1 is the TOP value - this is set so the frequency is equal to 20kHz
   ICR1L = (PWMVALUE & 0xFF);
@@ -48,19 +51,13 @@ void setup() {
   setPWM(leftPWM,0); // Turn off pwm on both pins
   setPWM(rightPWM,0);
 
+  stopAndReset();
+
   /* Setup pin for buzzer to beep when finished calibrating */
-  pinMode(buzzer,OUTPUT);  
+  pinMode(ledPin,OUTPUT);  
 
   /* Setup IMU Inputs */
-  #ifndef PROMINI
-  analogReference(EXTERNAL); // Set voltage reference to 3.3V by connecting AREF to 3.3V
-  #endif
-  pinMode(gyroY,INPUT);
-  pinMode(accY,INPUT);
-  pinMode(accZ,INPUT);      
-
-  if (Usb.Init() == -1) // Check if USB Host Shield is working
-    while(1); // Halt
+  setupIMU();
 
   /* Calibrate the gyro and accelerometer relative to ground */
   calibrateSensors();
@@ -68,15 +65,21 @@ void setup() {
   /* Setup timing */
   loopStartTime = micros();
   timer = loopStartTime;
+  encoderTimer = loopStartTime;
+  dataTimer = millis();
 }
 
 void loop() {
   /* Calculate pitch */
-  accYangle = getAccY();
-  gyroYrate = getGyroYrate();
-  gyroAngle += gyroYrate*((double)(micros()-timer)/1000000);
+  updateIMUsensor();
+  accAngle = (atan2(accY, accZ) + PI) * RAD_TO_DEG;
+  gyroRate = (double)(gyroX-gyroX_offset)/131.0; // Convert to deg/s
+  gyroAngle += gyroRate*((double)(micros()-timer)/1000000); // Gyro angle is only used for debugging
+  if (gyroAngle < 0 || gyroAngle > 360)
+    gyroAngle = pitch; // Reset the gyro angle when it has drifted too much
+
   // See my guide for more info about calculation the angles and the Kalman filter: http://arduino.cc/forum/index.php/topic,58048.0.htm
-  pitch = kalman.getAngle(accYangle, gyroYrate, (double)(micros() - timer)/1000000); // Calculate the angle using a Kalman filter
+  pitch = kalman.getAngle(accAngle, gyroRate, (double)(micros() - timer)/1000000); // Calculate the angle using a Kalman filter
   timer = micros();  
 
   /* Drive motors */
@@ -88,13 +91,12 @@ void loop() {
   } 
   else {
     layingDown = false; // It's no longer laying down
-    PID(targetAngle,targetOffset,turningOffset);        
+    PID(targetAngle,targetOffset,turningOffset);       
   }
 
   /* Update wheel velocity every 100ms */
-  loopCounter++;
-  if (loopCounter == 10) {
-    loopCounter = 0; // Reset loop counter
+  if (micros() - encoderTimer >= 100000) { // Update encoder values every 100ms
+    encoderTimer = micros();
     wheelPosition = readLeftEncoder() + readRightEncoder();
     wheelVelocity = wheelPosition - lastWheelPosition;
     lastWheelPosition = wheelPosition;
@@ -107,54 +109,45 @@ void loop() {
   /* Read the SPP connection */
   readSPP();    
   
-  if(SerialBT.connected) {
-    Usb.Task();
+  if (millis() - dataTimer > 50) {  // Only send data every 50ms
     if(sendPIDValues) {
       sendPIDValues = false;
-      strcpy(stringBuf,"P,");
-      strcat(stringBuf,SerialBT.doubleToString(Kp,2));
-      strcat(stringBuf,",");
-      strcat(stringBuf,SerialBT.doubleToString(Ki,2));
-      strcat(stringBuf,",");
-      strcat(stringBuf,SerialBT.doubleToString(Kd,2));
-      strcat(stringBuf,",");
-      strcat(stringBuf,SerialBT.doubleToString(targetAngle,2));
-      SerialBT.println(stringBuf);
-      dataCounter = 1;
+      dataTimer = millis(); // Reset the timer, to prevent it from sending data in the next loop
+
+      Serial.print("P,");
+      Serial.print(Kp);
+      Serial.print(',');
+      Serial.print(Ki);
+      Serial.print(',');
+      Serial.print(Kd);
+      Serial.print(',');
+      Serial.println(targetAngle);
     } else if(sendData) {
-      switch(dataCounter) {
-        case 0:      
-          strcpy(stringBuf,"V,");
-          strcat(stringBuf,SerialBT.doubleToString(accYangle,2));
-          strcat(stringBuf,",");
-          strcat(stringBuf,SerialBT.doubleToString(gyroAngle,2));
-          strcat(stringBuf,",");
-          strcat(stringBuf,SerialBT.doubleToString(pitch,2));
-          SerialBT.println(stringBuf);
-          break;
-      }    
-      dataCounter++;
-      if(dataCounter > 4)
-        dataCounter = 0;    
+      dataTimer = millis();
+      
+      Serial.print("V,");
+      Serial.print(accAngle);
+      Serial.print(',');
+      Serial.print(gyroAngle);
+      Serial.print(',');
+      Serial.println(pitch);
     }
   }
 
   /* Use a time fixed loop */
-  lastLoopUsefulTime = micros() - loopStartTime;
-  if (lastLoopUsefulTime < STD_LOOP_TIME) {
-    while((micros() - loopStartTime) < STD_LOOP_TIME)
-        Usb.Task();
-  }
-  loopStartTime = micros();    
+  while((micros() - loopStartTime) < STD_LOOP_TIME);
+  loopStartTime = micros();
 }
 void PID(double restAngle, double offset, double turning) {
   /* Steer robot */
   if (steerForward) {
-    offset += (double)wheelVelocity/velocityScaleMove; // Scale down offset at high speed and scale up when reversing
+    if (wheelVelocity < 0)
+      offset += (double)wheelVelocity/velocityScaleMove; // Scale down offset at high speed - wheel velocity is negative when driving forward
     restAngle -= offset;
-  } 
+  }
   else if (steerBackward) {
-    offset -= (double)wheelVelocity/velocityScaleMove; // Scale down offset at high speed and scale up when reversing
+    if (wheelVelocity > 0)
+      offset -= (double)wheelVelocity/velocityScaleMove; // Scale down offset at high speed - wheel velocity is positive when driving backward
     restAngle += offset;
   }
   /* Brake */
@@ -165,12 +158,14 @@ void PID(double restAngle, double offset, double turning) {
     else if (abs(positionError) > zoneB) // Inside zone B
       restAngle -= (double)positionError/positionScaleB;
     else // Inside zone C
-      restAngle -= (double)positionError/positionScaleC;   
+      restAngle -= (double)positionError/positionScaleC;
+
     restAngle -= (double)wheelVelocity/velocityScaleStop;
-    if (restAngle < 160) // Limit rest Angle
-      restAngle = 160;
-    else if (restAngle > 200)
-      restAngle = 200;
+    
+    if (restAngle < targetAngle-10) // Limit rest Angle
+      restAngle = targetAngle-10;
+    else if (restAngle > targetAngle+10)
+      restAngle = targetAngle+10;
   }
   /* Update PID values */
   double error = (restAngle - pitch);
@@ -202,7 +197,7 @@ void PID(double restAngle, double offset, double turning) {
     PIDRight = PIDValue;
   }
 
-  PIDLeft *= 0.95; // compensate for difference in the motors
+  //PIDLeft *= 0.95; // compensate for difference in the motors
 
   /* Set PWM Values */
   if (PIDLeft >= 0)
@@ -215,69 +210,65 @@ void PID(double restAngle, double offset, double turning) {
     moveMotor(right, backward, PIDRight * -1);
 }
 void readSPP() {
-  Usb.Task();
-  if(SerialBT.connected) {
-    if(SerialBT.available()) {
-      char input[30];
-      uint8_t i = 0;
-      while (1) {
-        input[i] = SerialBT.read();
-        if(input[i] == -1) // Error while reading the string
+  if(Serial.available()) {
+    char input[30];
+    uint8_t i = 0;
+    while (1) {
+      input[i] = Serial.read();
+      if(input[i] == -1) // Error while reading the string
+        return;
+      if (input[i] == ';') // Keep reading until it reads a semicolon
+        break;
+      i++;
+      if (i >= sizeof(input)/sizeof(input[0])) // String is too long
           return;
-        if (input[i] == ';') // Keep reading until it reads a semicolon
-          break;
-        i++;
-      }      
-      /*Serial.print("Data: ");
-      Serial.write((uint8_t*)input,i);
-      Serial.println();*/
-      if(input[0] == 'A') { // Abort
-        stopAndReset();
-        while(SerialBT.read() != 'C') // Wait until continue is send
-          Usb.Task();
-      } 
-      
+    }      
+
+    if(input[0] == 'A') { // Abort
+      stopAndReset();
+      while(Serial.read() != 'C');
+    } 
+    
+    else if (input[0] == 'G') { // The Processing/Android application sends when it needs the PID, settings or info
+      if (input[1] == 'P') // Get PID Values
+        sendPIDValues = true;
+    }
+
+    else if (input[0] == 'S') { // Set different values     
       /* Set PID and target angle */
-      else if(input[0] == 'P') {
+      if (input[1] == 'P') {
         strtok(input, ","); // Ignore 'P'
         Kp = atof(strtok(NULL, ";"));
-      } else if(input[0] == 'I') {
+      } else if (input[1] == 'I') {
         strtok(input, ","); // Ignore 'I'
-        Ki = atof(strtok(NULL, ";"));  
-      } else if(input[0] == 'D') {
+        Ki = atof(strtok(NULL, ";"));
+      } else if (input[1] == 'D') {
         strtok(input, ","); // Ignore 'D'
-        Kd = atof(strtok(NULL, ";"));  
-      } else if(input[0] == 'T') { // Target Angle
+        Kd = atof(strtok(NULL, ";"));
+      } else if (input[1] == 'T') { // Target Angle
         strtok(input, ","); // Ignore 'T'
-        targetAngle = atof(strtok(NULL, ";"));  
-      } else if(input[0] == 'G') { // The processing/Android application sends when it need the current values
-        if(input[1] == 'P') // PID Values
-          sendPIDValues = true;
-        else if(input[1] == 'B') // Begin
-          sendData = true; // Send output to processing/Android application
-        else if(input[1] == 'S') // Stop
-          sendData = false; // Stop sending output to processing/Android application
+        targetAngle = atof(strtok(NULL, ";"));
       }
-      /* Remote control */
-      else if(input[0] == 'S') // Stop
-        steer(stop);      
-      else if(input[0] == 'J') { // Joystick
+    }
+
+    else if (input[0] == 'I') { // IMU transmitting states
+      if (input[1] == 'B') // Begin sending IMU values
+        sendData = true; // Send output to Processing/Android application
+      else if (input[1] == 'S') // Stop sending IMU values
+        sendData = false; // Stop sending output to Processing/Android application
+    }
+    
+    else if (input[0] == 'C') { // Commands
+      if (input[1] == 'S') // Stop
+        steer(stop);
+      else if (input[1] == 'J') { // Joystick
         strtok(input, ","); // Ignore 'J'
         sppData1 = atof(strtok(NULL, ",")); // x-axis
         sppData2 = atof(strtok(NULL, ";")); // y-axis
         steer(joystick);
       }
-      else if(input[0] == 'M') { // IMU
-        strtok(input, ","); // Ignore 'I'
-        sppData1 = atof(strtok(NULL, ",")); // Pitch
-        sppData2 = atof(strtok(NULL, ";")); // Roll
-        steer(imu);
-        //SerialBT.printNumberln(sppData1);
-        //SerialBT.printNumberln(sppData2);
-      }
     }
-  } else
-    steer(stop);
+  }
 }
 void steer(Command command) {
   // Set all false
@@ -301,25 +292,7 @@ void steer(Command command) {
       turningOffset = scale(sppData1,0,-1,0,20);
       steerLeft = true;     
     }
-  } else if(command == imu) {
-      if(sppData2 > 0) {
-        targetOffset = scale(sppData2,1,36,0,7);        
-        steerForward = true;
-      }     
-      else if(sppData2 < 0) {
-        targetOffset = scale(sppData2,-1,-36,0,7);
-        steerBackward = true;
-      }
-      if(sppData1 > 0) {
-        turningOffset = scale(sppData1,1,45,0,20);        
-        steerLeft = true;
-      }
-      else if(sppData1 < 0) {
-        turningOffset = scale(sppData1,-1,-45,0,20);
-        steerRight = true;     
-      }
   }
-  
   else if(command == stop) {
     steerStop = true;    
     if(lastCommand != stop) { // Set new stop position
@@ -348,43 +321,28 @@ void stopAndReset() {
   iTerm = 0;
   targetPosition = wheelPosition;
 }
-double getGyroYrate() {
-  // (gyroAdc-gyroZero)/Sensitivity (In quids) - Sensitivity = 0.00333/3.3*1023=1.0323
-  double gyroRate = -((double)((double)analogRead(gyroY) - zeroValues[0]) / 1.0323);
-  return gyroRate;
-}
-double getAccY() {
-  double accYval = ((double)analogRead(accY) - zeroValues[1]);  
-  double accZval = ((double)analogRead(accZ) - zeroValues[2]);
-  // Convert to 360 degrees resolution
-  // atan2 outputs the value of -π to π (radians) - see http://en.wikipedia.org/wiki/Atan2
-  // We are then convert it to 0 to 2π and then from radians to degrees
-  return (atan2(-accYval,-accZval)+PI)*RAD_TO_DEG;
-}
 void calibrateSensors() {
+  int32_t accY_avg=0, accZ_avg=0, gyroX_avg=0;
   for (uint8_t i = 0; i < 100; i++) { // Take the average of 100 readings
-    zeroValues[0] += analogRead(gyroY);
-    zeroValues[1] += analogRead(accY);
-    zeroValues[2] += analogRead(accZ);
+    updateIMUsensor();
+    gyroX_offset += (int)gyroX;
+    accY_avg += (int)accY;
+    accZ_avg += (int)accZ;
     delay(10);
   }
-  zeroValues[0] /= 100; // Gyro X-axis
-  zeroValues[1] /= 100; // Accelerometer Y-axis
-  zeroValues[2] /= 100; // Accelerometer Z-axis
+  gyroX_avg /= 100; // Gyro X-axis
+  accY_avg /= 100; // Accelerometer Y-axis
+  accZ_avg /= 100; // Accelerometer Z-axis
 
-  if(zeroValues[1] > 500) { // Check which side is lying down - 1g is equal to 0.33V or 102.3 quids (0.33/3.3*1023=102.3)
-    zeroValues[1] -= 102.3; // +1g when lying at one of the sides
-    kalman.setAngle(90); // It starts at 90 degress and 270 when facing the other way
-    gyroAngle = 90;
-  } else {
-    zeroValues[1] += 102.3; // -1g when lying at the other side
-    kalman.setAngle(270);
-    gyroAngle = 270;
-  }
+  gyroX_offset = gyroX_avg;
+  accAngle = (atan2(accY_avg, accZ_avg) + PI) * RAD_TO_DEG;
+  
+  kalman.setAngle(accAngle);                                  // Set starting angle
+  gyroAngle = accAngle;
 
-  digitalWrite(buzzer,HIGH);
-  delay(100);  
-  digitalWrite(buzzer,LOW);
+  digitalWrite(ledPin,LOW);
+  delay(500);  
+  digitalWrite(ledPin,HIGH);
 }
 void moveMotor(Command motor, Command direction, double speedRaw) { // Speed is a value in percentage 0-100%
   if(speedRaw > 100)
@@ -404,12 +362,12 @@ void moveMotor(Command motor, Command direction, double speedRaw) { // Speed is 
   else if (motor == right) {
     setPWM(rightPWM,speed); // Right motor pwm
     if (direction == forward) {
-      cbi(rightPort,rightA);
-      sbi(rightPort,rightB);
-    } 
-    else if (direction == backward) {
       sbi(rightPort,rightA);
       cbi(rightPort,rightB);
+    } 
+    else if (direction == backward) {
+      cbi(rightPort,rightA);
+      sbi(rightPort,rightB);
     }
   }
 }
@@ -445,9 +403,9 @@ void leftEncoder() {
 }
 void rightEncoder() {
   if(PIND & _BV(PIND5)) // read pin 5
-    rightCounter--;
+    rightCounter++;
   else
-    rightCounter++;  
+    rightCounter--;  
 }
 long readLeftEncoder() { // The encoders decrease when motors are traveling forward and increase when traveling backward
   return leftCounter;
@@ -455,3 +413,131 @@ long readLeftEncoder() { // The encoders decrease when motors are traveling forw
 long readRightEncoder() {
   return rightCounter;
 }
+
+void setupIMU()
+{
+  // initialize device
+  accelgyro.initialize();
+  accelgyro.setRate(0);
+  accelgyro.setDLPFMode(0);
+  accelgyro.setTempSensorEnabled(false);
+
+  // verify connection
+  Serial.println(accelgyro.testConnection() ? "success" : "failed");
+
+  /* Setup IMU */
+  /*
+  Wire.begin();
+  i2cBuffer[0] = 19; // Set the sample rate to 400Hz - 8kHz/(19+1) = 400Hz
+  i2cBuffer[1] = 0x00; // Disable FSYNC and set 260 Hz Acc filtering, 256 Hz Gyro filtering, 8 KHz sampling
+  i2cBuffer[2] = 0x00; // Set Gyro Full Scale Range to ±250deg/s
+  i2cBuffer[3] = 0x00; // Set Accelerometer Full Scale Range to ±2g
+  while (i2cWrite(0x19, i2cBuffer, 4, false)); // Write to all four registers at once
+  while (i2cWrite(0x6B, 0x09, true)); // PLL with X axis gyroscope reference, disable temperature sensor and disable sleep mode
+  
+  while (i2cRead(0x75, i2cBuffer, 1));
+  if (i2cBuffer[0] != 0x68) { // Read "WHO_AM_I" register
+    Serial.print(F("Error reading sensor"));
+    while (1); // Halt
+  }
+
+  delay(100); // Wait for the sensor to get ready
+  */
+}
+
+void updateIMUsensor()
+{
+  // read raw accel/gyro measurements from device
+  accelgyro.getMotion6(&accX, &accY, &accZ, &gyroX, &gyroY, &gyroZ);
+
+  /* Update all the values, 讀取 MPU6050 的變量 */  
+  /*
+  while (i2cRead(0x3D, i2cBuffer, 8));
+  accY = ((i2cBuffer[0] << 8) | i2cBuffer[1]);
+  accZ = ((i2cBuffer[2] << 8) | i2cBuffer[3]);
+  gyroX = ((i2cBuffer[6] << 8) | i2cBuffer[7]);
+  */
+}
+
+/*
+const char* doubleToString(double input, uint8_t digits) {
+    char output[10];
+    char buffer[10];
+    if(input < 0) {
+        strcpy(output,"-");
+        input = -input;
+    }
+    else
+        strcpy(output,"");
+    
+    // Round correctly
+    double rounding = 0.5;
+    for (uint8_t i=0; i<digits; i++)
+        rounding /= 10.0;
+    input += rounding;
+    
+    unsigned long intpart = (unsigned long)input;
+    itoa(intpart,buffer,10); // Convert to string
+    strcat(output,buffer);
+    strcat(output,".");
+    double fractpart = (input-(double)intpart);
+    fractpart *= pow(10,digits);
+    for(uint8_t i=1;i<digits;i++) { // Put zeroes in front of number
+        if(fractpart < pow(10,digits-i)) {
+            strcat(output,"0");
+        }
+    }
+    itoa((unsigned long)fractpart,buffer,10); // Convert to string
+    strcat(output,buffer);
+    return output;
+}
+*/
+
+/*
+const uint8_t IMUAddress = 0x68; // AD0 is logic low on the PCB
+const uint16_t I2C_TIMEOUT = 1000; // Used to check for errors in I2C communication
+
+uint8_t i2cWrite(uint8_t registerAddress, uint8_t data, bool sendStop) {
+  return i2cWrite(registerAddress,&data,1,sendStop); // Returns 0 on success
+}
+
+uint8_t i2cWrite(uint8_t registerAddress, uint8_t *data, uint8_t length, bool sendStop) {
+  Wire.beginTransmission(IMUAddress);
+  Wire.write(registerAddress);
+  Wire.write(data, length);
+  uint8_t rcode = Wire.endTransmission(sendStop); // Returns 0 on success
+  if (rcode) {
+    Serial.print(F("i2cWrite failed: "));
+    Serial.println(rcode);
+  }
+  return rcode;
+}
+
+uint8_t i2cRead(uint8_t registerAddress, uint8_t *data, uint8_t nbytes) {
+  uint32_t timeOutTimer;
+  Wire.beginTransmission(IMUAddress);
+  Wire.write(registerAddress);
+  uint8_t rcode = Wire.endTransmission(false); // Don't release the bus
+  if (rcode) {
+    Serial.print(F("i2cRead failed: "));
+    Serial.println(rcode);
+    return rcode;
+  }
+  Wire.requestFrom(IMUAddress, nbytes,(uint8_t)true); // Send a repeated start and then release the bus after reading
+  for (uint8_t i = 0; i < nbytes; i++) {
+    if (Wire.available())
+      data[i] = Wire.read();
+    else {
+      timeOutTimer = micros();
+      while (((micros() - timeOutTimer) < I2C_TIMEOUT) && !Wire.available());
+      if (Wire.available())
+        data[i] = Wire.read();
+      else {
+        Serial.println(F("i2cRead timeout"));
+        return 5; // This error value is not already taken by endTransmission
+      }
+    }
+  }
+  return 0; // Success
+}
+*/

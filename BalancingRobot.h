@@ -12,7 +12,7 @@ bool sendPIDValues;
 #define PWMVALUE F_CPU/PWM_FREQUENCY/2 // Frequency is given by F_CPU/(2*N*ICR) - where N is the prescaler, we use no prescaling so frequency is given by F_CPU/(2*ICR) - ICR = F_CPU/PWM_FREQUENCY/2
 
 /* Used for the Communication and motor functions */
-int lastCommand; // This is used set a new targetPosition
+uint8_t lastCommand; // This is used set a new targetPosition
 enum Command {
   stop,
   forward,
@@ -39,10 +39,10 @@ enum Command {
 /* Right motor */
 #define rightPort PORTC
 #define rightPortDirection DDRC
-#define rightPwmPortDirection DDRB
-
 #define rightA PINC2
 #define rightB PINC3
+
+#define rightPwmPortDirection DDRB
 #define rightPWM PINB1
 
 /* Encoders */
@@ -51,15 +51,12 @@ enum Command {
 #define rightEncoder1 3
 #define rightEncoder2 5
 
-volatile long leftCounter = 0;
-volatile long rightCounter = 0;
+volatile int32_t leftCounter = 0;
+volatile int32_t rightCounter = 0;
 
 /* IMU */
 int16_t accX, accY, accZ;
 int16_t gyroX, gyroY, gyroZ;
-//int16_t accY;
-//int16_t accZ;
-//int16_t gyroX;
 
 uint8_t i2cBuffer[14]; // Buffer for I2C data
 
@@ -69,26 +66,30 @@ uint8_t i2cBuffer[14]; // Buffer for I2C data
 double gyroX_offset = 0;
 
 // Results
-double accAngle;
-double gyroRate;
-double gyroAngle;
+double accAngle, gyroRate, gyroAngle;
 double pitch;
 
 /* PID variables */
-double Kp = 7;
-double Ki = 0;
-double Kd = 8;
-double targetAngle = 180;
+double Kp = 10.0;
+double Ki = 2.0;
+double Kd = 3.0;
+double targetAngle = 181.5;
 
-double lastError; // Store position error
-double iTerm; // Store integral term
+double lastRestAngle; // Used to limit the new restAngle if it's much larger than the previous one
+
+double lastError; // Store last angle error
+double integratedError; // Store integrated error
+
+double error;
+double pTerm, iTerm, dTerm;
+double PIDValue, PIDLeft, PIDRight;
 
 /* Used for timing */
-unsigned long timer;
+#define STD_LOOP_TIME 7000 // Fixed time loop of 10 milliseconds
+uint32_t loopStartTime;
 
-#define STD_LOOP_TIME 10000 // Fixed time loop of 10 milliseconds
-unsigned long loopStartTime;
-
+uint32_t kalmanTimer; // Timer used for the Kalman filter
+uint32_t pidTimer; // Timer used for the PID loop
 uint32_t encoderTimer; // Timer used used to determine when to update the encoder values
 uint32_t dataTimer; // This is used so it doesn't send data to often
 
@@ -108,17 +109,19 @@ double turningOffset = 0; // Offset for turning left and right
 double sppData1 = 0;
 double sppData2 = 0;
 
-uint8_t loopCounter = 0; // Used to update wheel velocity
-long wheelPosition;
-long lastWheelPosition;
-long wheelVelocity;
-long targetPosition;
-int zoneA = 8000;
-int zoneB = 4000;
-double positionScaleA = 500; // One resolution is 464 pulses
-double positionScaleB = 1000; 
-double positionScaleC = 2000;
-double velocityScaleMove = 70;
-double velocityScaleStop = 60;
-double velocityScaleTurning = 70;
+int32_t lastWheelPosition;
+int32_t wheelVelocity;
+int32_t targetPosition;
+
+const uint16_t zoneA = 8000;
+const uint16_t zoneB = 4000;
+const uint16_t zoneC = 1000;
+const double positionScaleA = 600; // One resolution is 928 pulses per encoder
+const double positionScaleB = 800;
+const double positionScaleC = 1000;
+const double positionScaleD = 500;
+const double velocityScaleMove = 70;
+const double velocityScaleStop = 60;
+const double velocityScaleTurning = 70;
+
 #endif

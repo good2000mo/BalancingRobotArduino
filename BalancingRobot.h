@@ -28,28 +28,28 @@ enum Command {
 #define sbi(sfr, bit) (_SFR_BYTE(sfr) |= _BV(bit))
 
 /* Left motor */
-#define leftPort PORTC
-#define leftPortDirection DDRC
-#define leftA PINC0
-#define leftB PINC1
-
-#define leftPwmPortDirection DDRB
-#define leftPWM PINB2
-
-/* Right motor */
-#define rightPort PORTC
-#define rightPortDirection DDRC
-#define rightA PINC2
-#define rightB PINC3
+#define rightPort PORTB
+#define rightPortDirection DDRB
+#define rightA PINB3
+#define rightB PINB4
 
 #define rightPwmPortDirection DDRB
-#define rightPWM PINB1
+#define rightPWM PINB2
+
+/* Right motor */
+#define leftPort PORTD
+#define leftPortDirection DDRD
+#define leftA PIND7
+#define leftB PIND6
+
+#define leftPwmPortDirection DDRB
+#define leftPWM PINB1
 
 /* Encoders */
-#define leftEncoder1 2
-#define leftEncoder2 4
-#define rightEncoder1 3
-#define rightEncoder2 5
+#define rightEncoder1 2
+#define rightEncoder2 4
+#define leftEncoder1 3
+#define leftEncoder2 5
 
 volatile int32_t leftCounter = 0;
 volatile int32_t rightCounter = 0;
@@ -62,18 +62,15 @@ uint8_t i2cBuffer[14]; // Buffer for I2C data
 
 #define ledPin 13
 
-// Zero voltage values for the sensors - gyroX
-double gyroX_offset = 0;
-
 // Results
 double accAngle, gyroRate, gyroAngle;
 double pitch;
 
 /* PID variables */
-double Kp = 10.0;
-double Ki = 2.0;
-double Kd = 3.0;
-double targetAngle = 181.5;
+double Kp = 20.0;
+double Ki = 0.0;
+double Kd = 2.0;
+double targetAngle = 182.5;
 
 double lastRestAngle; // Used to limit the new restAngle if it's much larger than the previous one
 
@@ -119,9 +116,9 @@ const uint16_t zoneC = 1000;
 const double positionScaleA = 600; // One resolution is 928 pulses per encoder
 const double positionScaleB = 800;
 const double positionScaleC = 1000;
-const double positionScaleD = 500;
+double positionScaleD = 5000;
 const double velocityScaleMove = 70;
-const double velocityScaleStop = 60;
+double velocityScaleStop = 1000;
 const double velocityScaleTurning = 70;
 
 #endif

@@ -72,7 +72,7 @@ void loop() {
   /* Calculate pitch */
   updateIMUsensor();
   accAngle = (atan2(accY, accZ) + PI) * RAD_TO_DEG;
-  gyroRate = (double)(gyroX-gyroX_offset)/131.0; // Convert to deg/s
+  gyroRate = (double)gyroX/131.0; // Convert to deg/s
   gyroAngle += gyroRate*((double)(micros()-kalmanTimer)/1000000.0); // Gyro angle is only used for debugging
   if (gyroAngle < 0 || gyroAngle > 360)
     gyroAngle = pitch; // Reset the gyro angle when it has drifted too much
@@ -156,12 +156,26 @@ void PID(double restAngle, double offset, double turning, double dt) {
     int32_t wheelPosition = getWheelPosition();
     int32_t positionError = wheelPosition - targetPosition;
 
-    if (abs(positionError) < zoneC)
+    if (abs(positionError) < zoneC) {
       restAngle -= (double)positionError/positionScaleD;
-    else
+    } else {
       targetPosition = wheelPosition;
+    }
 
     restAngle -= (double)wheelVelocity/velocityScaleStop;
+
+    //Serial.print(Kp);Serial.print("\t");
+    //Serial.print(Ki);Serial.print("\t");
+    //Serial.print(Kd);Serial.print("\t");
+    //Serial.print(targetAngle);Serial.print("\t\t");
+
+    //Serial.print(wheelVelocity);Serial.print("\t");
+    //Serial.print(velocityScaleStop);Serial.print("\t");
+    //Serial.print((double)wheelVelocity/velocityScaleStop);Serial.print("\t\t");
+
+    //Serial.print(positionError);Serial.print("\t");
+    //Serial.print(positionScaleD);Serial.print("\t");
+    //Serial.print((double)positionError/positionScaleD);Serial.print("\t\t");
 
     if (restAngle < targetAngle-10) // Limit rest Angle
       restAngle = targetAngle-10;
@@ -184,6 +198,11 @@ void PID(double restAngle, double offset, double turning, double dt) {
   dTerm = (Kd/100.0) * (error - lastError)/dt;
   lastError = error;
   PIDValue = pTerm + iTerm + dTerm;
+
+  //Serial.print(pTerm);Serial.print("\t");
+  //Serial.print(iTerm);Serial.print("\t");
+  //Serial.print(dTerm);Serial.print("\t");
+  //Serial.print(PIDValue);Serial.print("\t\t");
   
   /* Steer robot sideways */
   if (steerLeft) {
@@ -205,7 +224,7 @@ void PID(double restAngle, double offset, double turning, double dt) {
     PIDRight = PIDValue;
   }
 
-  //PIDLeft *= 0.95; // compensate for difference in the motors
+  PIDLeft *= 0.85; // compensate for difference in the motors
 
   /* Set PWM Values */
   if (PIDLeft >= 0)
@@ -256,6 +275,12 @@ void readSPP() {
       } else if (input[1] == 'T') { // Target Angle
         strtok(input, ","); // Ignore 'T'
         targetAngle = atof(strtok(NULL, ";"));
+      } else if (input[1] == 'S') {
+        strtok(input, ",");
+        velocityScaleStop = atof(strtok(NULL, ";"));
+      } else if (input[1] == 'X') {
+        strtok(input, ",");
+        positionScaleD = atof(strtok(NULL, ";"));
       }
     }
 
@@ -287,17 +312,17 @@ void steer(Command command) {
   steerRight = false;
   if(command == joystick) {    
     if(sppData2 > 0) {
-      targetOffset = scale(sppData2,0,1,0,7);        
+      targetOffset = scale(sppData2,0,1,0,6);        
       steerForward = true;
     } else if(sppData2 < 0) {
-      targetOffset = scale(sppData2,0,-1,0,7);
+      targetOffset = scale(sppData2,0,-1,0,6);
       steerBackward = true;
     } 
     if(sppData1 > 0) {
-      turningOffset = scale(sppData1,0,1,0,20);        
+      turningOffset = scale(sppData1,0,1,0,16);        
       steerRight = true;
     } else if(sppData1 < 0) {
-      turningOffset = scale(sppData1,0,-1,0,20);
+      turningOffset = scale(sppData1,0,-1,0,16);
       steerLeft = true;     
     }
   }
